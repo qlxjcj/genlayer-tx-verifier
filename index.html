@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Transaction Verifier — GenLayer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0f; color: #e0e0e0; }
+.container { max-width: 900px; margin: 0 auto; padding: 20px; }
+.header { display: flex; justify-content: space-between; align-items: center; padding: 16px 0; border-bottom: 1px solid #1a1a2e; margin-bottom: 24px; }
+.header h1 { font-size: 1.4em; color: #3b82f6; }
+.btn { padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; transition: all .2s; }
+.btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.btn-primary { background: #3b82f6; color: white; }
+.btn-primary:hover:not(:disabled) { background: #2563eb; }
+.btn-outline { background: transparent; border: 1px solid #3b82f6; color: #3b82f6; }
+.btn-sm { padding: 6px 14px; font-size: 12px; }
+.card { background: #12121a; border: 1px solid #1a1a2e; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+.card h2 { font-size: 1.1em; margin-bottom: 12px; color: #60a5fa; }
+.form-group { margin-bottom: 12px; }
+.form-group label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; }
+.form-group input, .form-group select { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #1a1a2e; background: #0a0a0f; color: #e0e0e0; font-size: 14px; }
+.stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+.stat { background: #12121a; border: 1px solid #1a1a2e; border-radius: 10px; padding: 14px; text-align: center; }
+.stat .num { font-size: 1.6em; font-weight: 700; color: #60a5fa; }
+.stat .label { font-size: 10px; color: #666; margin-top: 4px; }
+.result-box { margin-top: 10px; font-size: 13px; white-space: pre-wrap; background: #0a0a0f; padding: 12px; border-radius: 8px; border: 1px solid #1a1a2e; min-height: 40px; }
+.tag { padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; }
+.tag-true { background: #16a34a20; color: #16a34a; }
+.tag-false { background: #dc262620; color: #dc2626; }
+.tag-SUCCESS { background: #16a34a20; color: #16a34a; }
+.tag-FAILED { background: #dc262620; color: #dc2626; }
+.tag-PENDING { background: #f59e0b20; color: #f59e0b; }
+.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #ffffff40; border-top-color: #fff; border-radius: 50%; animation: spin 0.6s linear infinite; margin-right: 6px; vertical-align: middle; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.toast { position: fixed; bottom: 20px; right: 20px; padding: 12px 24px; border-radius: 8px; font-size: 13px; z-index: 999; }
+.toast-success { background: #16a34a; color: white; }
+.toast-error { background: #dc2626; color: white; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div>
+      <h1>Transaction Verifier</h1>
+      <div style="font-size:11px;color:#666;margin-top:4px;">Cross-chain transaction verification via AI consensus</div>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;">
+      <a href="#" id="explorerLink" style="color:#3b82f6;font-size:11px;text-decoration:none;">Explorer</a>
+      <button class="btn btn-outline btn-sm" id="connectBtn">Connect Wallet</button>
+    </div>
+  </div>
+
+  <div class="stats-grid">
+    <div class="stat"><div class="num" id="statTotal">-</div><div class="label">Verifications</div></div>
+    <div class="stat"><div class="num" id="statConfirmed">-</div><div class="label">Confirmed</div></div>
+    <div class="stat"><div class="num" id="statNotFound">-</div><div class="label">Not Found</div></div>
+  </div>
+
+  <div class="card">
+    <h2>Verify Transaction</h2>
+    <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px;">
+      <div class="form-group"><label>Transaction Hash</label><input id="txHash" placeholder="0x..."></div>
+      <div class="form-group"><label>Chain</label>
+        <select id="chain"><option>ethereum</option><option>bsc</option><option>polygon</option><option>arbitrum</option></select>
+      </div>
+    </div>
+    <button class="btn btn-primary" id="verifyBtn">Verify Transaction</button>
+    <div id="resultArea" class="result-box" style="margin-top:12px;"></div>
+  </div>
+
+  <div class="card">
+    <h2>Recent Verifications</h2>
+    <div id="historyList" style="color:#666;">No verifications yet.</div>
+  </div>
+</div>
+
+<script type="module">
+import { createClient } from 'https://cdn.jsdelivr.net/npm/genlayer-js@1.2.0/+esm';
+
+let CONTRACT = '0xPLACEHOLDER';
+
+const chainConfig = {
+  id: 2365, name: 'Bradbury',
+  rpcUrls: { default: { http: ['https://rpc-bradbury.genlayer.com'] } },
+  nativeCurrency: { name: 'GEN', symbol: 'GEN', decimals: 18 }
+};
+
+const readClient = createClient({ chain: chainConfig });
+let writeClient = null;
+let account = null;
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = String(str ?? '');
+  return div.innerHTML;
+}
+
+async function connectWallet() {
+  if (!window.ethereum) throw new Error('Install MetaMask');
+  await window.ethereum.request({ method: 'eth_requestAccounts' });
+  const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+  account = accounts[0];
+  writeClient = createClient({ chain: chainConfig, account, provider: window.ethereum });
+  await writeClient.connect('testnetBradbury');
+  return account;
+}
+
+document.getElementById('connectBtn').onclick = async () => {
+  const btn = document.getElementById('connectBtn');
+  try {
+    btn.disabled = true; btn.textContent = 'Connecting...';
+    const addr = await connectWallet();
+    btn.textContent = addr.slice(0,6)+'...'+addr.slice(-4);
+    btn.className = 'btn btn-primary btn-sm';
+    toast('Wallet connected!', 'success');
+  } catch(e) { toast(e.message, 'error'); btn.textContent = 'Connect Wallet'; btn.className = 'btn btn-outline btn-sm'; }
+  finally { btn.disabled = false; }
+};
+
+async function readContract(method, args) {
+  return await readClient.readContract({ address: CONTRACT, functionName: method, args });
+}
+
+async function writeContract(method, args) {
+  if (!writeClient) await connectWallet();
+  const txHash = await writeClient.writeContract({ address: CONTRACT, functionName: method, args, value: 0n });
+  await writeClient.waitForTransactionReceipt({ hash: txHash, status: 'ACCEPTED' });
+  return txHash;
+}
+
+async function loadStats() {
+  try {
+    const count = await readContract('get_verification_count', []);
+    document.getElementById('statTotal').textContent = count.toString();
+  } catch(e) { console.log(e); }
+}
+
+document.getElementById('verifyBtn').onclick = async () => {
+  const txHash = document.getElementById('txHash').value.trim();
+  const chain = document.getElementById('chain').value;
+  if (!txHash) return toast('Enter transaction hash', 'error');
+
+  const btn = document.getElementById('verifyBtn');
+  btn.disabled = true; btn._origText = btn.textContent;
+  const spinner = document.createElement('span');
+  spinner.className = 'spinner';
+  btn.textContent = '';
+  btn.appendChild(spinner);
+  btn.appendChild(document.createTextNode(' Verifying...'));
+
+  const resultArea = document.getElementById('resultArea');
+  resultArea.textContent = 'Verifying...';
+
+  try {
+    const hash = await writeContract('verify', [txHash, chain]);
+    const count = await readContract('get_verification_count', []);
+    const raw = await readContract('get_verification', [count.toString()]);
+    const v = typeof raw === 'string' ? JSON.parse(raw) : raw;
+
+    resultArea.textContent = '';
+    const exists = document.createElement('div');
+    exists.style.marginBottom = '8px';
+    exists.innerHTML = 'Exists: <span class="tag tag-' + escapeHtml(v.exists) + '">' + escapeHtml(v.exists) + '</span>';
+    resultArea.appendChild(exists);
+
+    if (v.exists === 'true') {
+      const details = document.createElement('div');
+      details.style.fontSize = '12px';
+      details.innerHTML = 'From: ' + escapeHtml(v.from_address) + '<br>To: ' + escapeHtml(v.to_address) + '<br>Value: ' + escapeHtml(v.value) + '<br>Status: <span class="tag tag-' + escapeHtml(v.status) + '">' + escapeHtml(v.status) + '</span>';
+      resultArea.appendChild(details);
+    }
+
+    const reasoning = document.createElement('div');
+    reasoning.style.marginTop = '8px';
+    reasoning.style.fontSize = '12px';
+    reasoning.style.color = '#888';
+    reasoning.textContent = v.reasoning || '';
+    resultArea.appendChild(reasoning);
+
+    toast('Verification complete!', 'success');
+    loadStats();
+  } catch(e) { resultArea.textContent = 'Error: ' + e.message; toast(e.message, 'error'); }
+  btn.disabled = false; btn.textContent = btn._origText;
+};
+
+function toast(msg, type) {
+  const t = document.createElement('div');
+  t.className = 'toast toast-'+type;
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 5000);
+}
+
+loadStats();
+</script>
+</body>
+</html>
