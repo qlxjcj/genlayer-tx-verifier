@@ -7,16 +7,19 @@ from genlayer import *
 EXPLORER_SOURCES = {
     "ethereum": [
         "https://api.etherscan.io/api?module=proxy&action=eth_getTransactionByHash&txhash=",
-        "https://api.blockcypher.com/v1/eth/main/txs/",
+        "https://api.etherscan.io/api?module=proxy&action=eth_getTransactionReceipt&txhash=",
     ],
     "bsc": [
         "https://api.bscscan.com/api?module=proxy&action=eth_getTransactionByHash&txhash=",
+        "https://api.bscscan.com/api?module=proxy&action=eth_getTransactionReceipt&txhash=",
     ],
     "polygon": [
         "https://api.polygonscan.com/api?module=proxy&action=eth_getTransactionByHash&txhash=",
+        "https://api.polygonscan.com/api?module=proxy&action=eth_getTransactionReceipt&txhash=",
     ],
     "arbitrum": [
         "https://api.arbiscan.io/api?module=proxy&action=eth_getTransactionByHash&txhash=",
+        "https://api.arbiscan.io/api?module=proxy&action=eth_getTransactionReceipt&txhash=",
     ],
 }
 
@@ -33,7 +36,9 @@ class Verification:
     value: str
     status: str
     sources_checked: str
-    sources_confirmed: str
+    sources_agreed: str
+    source_outage: str
+    receipt_status: str
     reasoning: str
     fetched_at: str
 
@@ -64,7 +69,9 @@ class TransactionVerifier(gl.Contract):
                     "value": "0",
                     "status": "UNKNOWN",
                     "sources_checked": 0,
-                    "sources_confirmed": 0,
+                    "sources_agreed": 0,
+                    "source_outage": "true",
+                    "receipt_status": "UNKNOWN",
                     "reasoning": "Unsupported chain: " + chain,
                 }
 
@@ -78,7 +85,9 @@ class TransactionVerifier(gl.Contract):
                     fetched_data.append({"url": url, "data": "", "retrieved": False})
 
             retrieved = [d for d in fetched_data if d["retrieved"]]
-            if not retrieved:
+            outage = len(retrieved) == 0
+
+            if outage:
                 return {
                     "exists": "false",
                     "from_address": "",
@@ -86,8 +95,10 @@ class TransactionVerifier(gl.Contract):
                     "value": "0",
                     "status": "UNKNOWN",
                     "sources_checked": len(sources),
-                    "sources_confirmed": 0,
-                    "reasoning": "No sources could be retrieved.",
+                    "sources_agreed": 0,
+                    "source_outage": "true",
+                    "receipt_status": "UNKNOWN",
+                    "reasoning": "All sources failed - source outage, not verified nonexistence.",
                 }
 
             parts = []
@@ -95,14 +106,18 @@ class TransactionVerifier(gl.Contract):
                 parts.append("[Source " + str(i+1) + "] " + d["url"] + ":\n" + d["data"][:500])
             sources_text = "\n".join(parts)
 
-            json_format = chr(123) + chr(34) + "exists" + chr(34) + ": " + chr(34) + "true" + chr(34) + "|" + chr(34) + "false" + chr(34) + ", " + chr(34) + "from_address" + chr(34) + ": " + chr(34) + "<address>" + chr(34) + ", " + chr(34) + "to_address" + chr(34) + ": " + chr(34) + "<address>" + chr(34) + ", " + chr(34) + "value" + chr(34) + ": " + chr(34) + "<number>" + chr(34) + ", " + chr(34) + "status" + chr(34) + ": " + chr(34) + "SUCCESS" + chr(34) + "|" + chr(34) + "FAILED" + chr(34) + "|" + chr(34) + "PENDING" + chr(34) + ", " + chr(34) + "reasoning" + chr(34) + ": " + chr(34) + "<text>" + chr(34) + chr(125)
+            json_format = chr(123) + chr(34) + "exists" + chr(34) + ": " + chr(34) + "true" + chr(34) + "|" + chr(34) + "false" + chr(34) + ", " + chr(34) + "from_address" + chr(34) + ": " + chr(34) + "<address>" + chr(34) + ", " + chr(34) + "to_address" + chr(34) + ": " + chr(34) + "<address>" + chr(34) + ", " + chr(34) + "value" + chr(34) + ": " + chr(34) + "<number>" + chr(34) + ", " + chr(34) + "receipt_status" + chr(34) + ": " + chr(34) + "SUCCESS" + chr(34) + "|" + chr(34) + "FAILED" + chr(34) + "|" + chr(34) + "PENDING" + chr(34) + ", " + chr(34) + "sources_agreed" + chr(34) + ": " + chr(34) + "<count>" + chr(34) + ", " + chr(34) + "reasoning" + chr(34) + ": " + chr(34) + "<text>" + chr(34) + chr(125)
 
             task = (
-                "You are a transaction verifier. Verify if the following transaction exists on " + chain + ".\n"
+                "You are a transaction verifier. Verify the following transaction using receipt/proof-backed evidence.\n"
                 "TX HASH: " + tx_hash + "\n"
+                "CHAIN: " + chain + "\n"
                 "SOURCES (" + str(len(retrieved)) + " retrieved):\n" + sources_text + "\n\n"
-                "Verify: does this transaction exist? What are the from/to addresses, value, and status?\n"
-                "Status should be SUCCESS, FAILED, or PENDING.\n\n"
+                "Rules:\n"
+                "1. exists=true ONLY if transaction data is found in retrieved sources\n"
+                "2. receipt_status derived from receipt evidence (SUCCESS/FAILED/PENDING)\n"
+                "3. sources_agreed = count of sources with matching transaction details\n"
+                "4. If no transaction found in any source, exists=false (verified nonexistence)\n\n"
                 "Respond ONLY in JSON: " + json_format
             )
             result = gl.nondet.exec_prompt(task)
@@ -111,20 +126,22 @@ class TransactionVerifier(gl.Contract):
             if not isinstance(result, dict):
                 raise gl.vm.UserError("[LLM_ERROR] LLM returned non-dict result")
             result["sources_checked"] = len(sources)
-            result["sources_confirmed"] = len(retrieved)
+            result["source_outage"] = "false"
+            result["status"] = result.get("receipt_status", "UNKNOWN")
             return result
 
         principle = (
             "Two results are equivalent if exists matches exactly, "
             "from_address matches exactly, to_address matches exactly, "
-            "value matches exactly, status matches exactly, "
-            "sources_checked and sources_confirmed match exactly. "
+            "value matches exactly, receipt_status matches exactly, "
+            "sources_checked matches exactly, sources_agreed matches exactly, "
+            "and source_outage matches exactly. "
             "reasoning wording may differ."
         )
         return gl.eq_principle.prompt_comparative(gather_and_verify, principle)
 
     @gl.public.write
-    def verify(self, tx_hash: str, chain: str):
+    def verify(self, tx_hash: str, chain: str) -> str:
         if not tx_hash or not tx_hash.strip():
             raise gl.vm.UserError("Transaction hash is required")
         tx_hash = tx_hash.strip().lower()
@@ -151,11 +168,14 @@ class TransactionVerifier(gl.Contract):
             value=str(result.get("value", "0")),
             status=str(result.get("status", "UNKNOWN")),
             sources_checked=str(result.get("sources_checked", 0)),
-            sources_confirmed=str(result.get("sources_confirmed", 0)),
+            sources_agreed=str(result.get("sources_agreed", 0)),
+            source_outage=str(result.get("source_outage", "false")).lower(),
+            receipt_status=str(result.get("receipt_status", "UNKNOWN")),
             reasoning=str(result.get("reasoning", "")),
             fetched_at=datetime.now(timezone.utc).isoformat(),
         )
         self.verifications[verification_id] = json.dumps(verification.__dict__)
+        return verification_id
 
     @gl.public.view
     def get_verification(self, verification_id: str) -> str:
@@ -174,6 +194,7 @@ class TransactionVerifier(gl.Contract):
         total = 0
         confirmed = 0
         not_found = 0
+        outages = 0
         by_chain = {}
         by_status = {}
         for v in self.verifications.values():
@@ -181,7 +202,9 @@ class TransactionVerifier(gl.Contract):
             total += 1
             chain = r.get("chain", "unknown")
             by_chain[chain] = by_chain.get(chain, 0) + 1
-            if r.get("exists") == "true":
+            if r.get("source_outage") == "true":
+                outages += 1
+            elif r.get("exists") == "true":
                 confirmed += 1
                 status = r.get("status", "UNKNOWN")
                 by_status[status] = by_status.get(status, 0) + 1
@@ -191,6 +214,7 @@ class TransactionVerifier(gl.Contract):
             "total": total,
             "confirmed": confirmed,
             "not_found": not_found,
+            "outages": outages,
             "by_chain": by_chain,
             "by_status": by_status,
         }
